@@ -32,6 +32,7 @@ import math
 
 
 RATING_COLUMNS = [str(i) for i in range(20)]
+PLOT_STYLE = "seaborn-v0_8"
 
 
 @dataclass
@@ -473,6 +474,127 @@ def compute_distinctive_preferences(
     return highlights
 
 
+def _safe_import_matplotlib() -> Tuple[object | None, object | None]:
+    try:
+        import matplotlib.pyplot as plt  # type: ignore
+        from matplotlib import cm  # type: ignore
+    except ImportError:
+        return None, None
+    return plt, cm
+
+
+def _ensure_output_dir(path: Path) -> Path:
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def generate_visualisations(
+    output_dir: Path,
+    heatmap_table: Dict[str, Dict[str, float]],
+    male_summary: List[Dict[str, object]],
+    female_overview: List[Dict[str, object]],
+    correlation_matrix: Dict[str, Dict[str, float]],
+    consensus_table: List[Dict[str, object]],
+    polarisation_table: List[Dict[str, object]],
+) -> List[Path]:
+    """Generate visual summaries if matplotlib is available."""
+
+    plt, cm = _safe_import_matplotlib()
+    if plt is None or cm is None:
+        print("Matplotlib not available; skipping visualisations.")
+        return []
+
+    output_dir = _ensure_output_dir(output_dir)
+    plt.style.use(PLOT_STYLE)
+    saved_paths: List[Path] = []
+
+    women = list(heatmap_table.keys())
+    men = sorted({men for row in heatmap_table.values() for men in row})
+    heatmap_values = [
+        [heatmap_table[women_group].get(men_group, float("nan")) for men_group in men]
+        for women_group in women
+    ]
+
+    fig, ax = plt.subplots(figsize=(max(8, len(men) * 0.7), max(6, len(women) * 0.6)))
+    cax = ax.imshow(heatmap_values, cmap="viridis")
+    ax.set_xticks(range(len(men)))
+    ax.set_yticks(range(len(women)))
+    ax.set_xticklabels(men, rotation=45, ha="right")
+    ax.set_yticklabels(women)
+    ax.set_title("Mean Ratings Heatmap (Women x Men)")
+    fig.colorbar(cax, ax=ax, label="Mean rating")
+    fig.tight_layout()
+    heatmap_path = output_dir / "mean_ratings_heatmap.png"
+    fig.savefig(heatmap_path, dpi=150)
+    saved_paths.append(heatmap_path)
+    plt.close(fig)
+
+    fig, ax = plt.subplots(figsize=(8, 5))
+    men_labels = [row["Men"] for row in male_summary]
+    men_means = [row["mean_of_means"] for row in male_summary]
+    ax.barh(men_labels, men_means, color=cm.Blues(0.6))
+    ax.set_xlabel("Average mean rating")
+    ax.set_title("Overall Male Performance")
+    ax.invert_yaxis()
+    fig.tight_layout()
+    male_path = output_dir / "male_performance_bar.png"
+    fig.savefig(male_path, dpi=150)
+    saved_paths.append(male_path)
+    plt.close(fig)
+
+    fig, ax = plt.subplots(figsize=(8, 5))
+    women_labels = [row["Women"] for row in female_overview]
+    women_means = [row["overall_mean"] for row in female_overview]
+    ax.barh(women_labels, women_means, color=cm.Purples(0.6))
+    ax.set_xlabel("Average rating given")
+    ax.set_title("Female Group Rating Baselines")
+    ax.invert_yaxis()
+    fig.tight_layout()
+    female_path = output_dir / "female_baselines_bar.png"
+    fig.savefig(female_path, dpi=150)
+    saved_paths.append(female_path)
+    plt.close(fig)
+
+    corr_labels = sorted(correlation_matrix)
+    corr_values = [
+        [correlation_matrix[row].get(col, float("nan")) for col in corr_labels]
+        for row in corr_labels
+    ]
+    fig, ax = plt.subplots(figsize=(max(7, len(corr_labels) * 0.7), max(6, len(corr_labels) * 0.6)))
+    cax = ax.imshow(corr_values, cmap="coolwarm", vmin=-1, vmax=1)
+    ax.set_xticks(range(len(corr_labels)))
+    ax.set_yticks(range(len(corr_labels)))
+    ax.set_xticklabels(corr_labels, rotation=45, ha="right")
+    ax.set_yticklabels(corr_labels)
+    ax.set_title("Female Similarity (Pearson Correlation)")
+    fig.colorbar(cax, ax=ax, label="Correlation")
+    fig.tight_layout()
+    corr_path = output_dir / "female_similarity_heatmap.png"
+    fig.savefig(corr_path, dpi=150)
+    saved_paths.append(corr_path)
+    plt.close(fig)
+
+    polarisation_by_men = {row["Men"]: row["polarisation"] for row in polarisation_table}
+    fig, ax = plt.subplots(figsize=(7, 5))
+    x_vals = [row["average_rank"] for row in consensus_table]
+    y_vals = [polarisation_by_men.get(row["Men"], 0.0) for row in consensus_table]
+    labels = [row["Men"] for row in consensus_table]
+    scatter = ax.scatter(x_vals, y_vals, c=y_vals, cmap="plasma", s=100, edgecolor="black")
+    for x, y, label in zip(x_vals, y_vals, labels):
+        ax.annotate(label, (x, y), textcoords="offset points", xytext=(5, 5), fontsize=8)
+    ax.set_xlabel("Consensus average rank (lower = better)")
+    ax.set_ylabel("Polarisation (90th-10th percentile)")
+    ax.set_title("Consensus Rank vs Polarisation")
+    fig.colorbar(scatter, ax=ax, label="Polarisation")
+    fig.tight_layout()
+    scatter_path = output_dir / "consensus_vs_polarisation.png"
+    fig.savefig(scatter_path, dpi=150)
+    saved_paths.append(scatter_path)
+    plt.close(fig)
+
+    return saved_paths
+
+
 def run_analysis(csv_path: Path) -> Tuple[
     List[Dict[str, object]],
     Dict[str, List[Dict[str, object]]],
@@ -617,6 +739,7 @@ def _format_square_matrix(matrix: Dict[str, Dict[str, float]]) -> str:
 
 if __name__ == "__main__":
     dataset_path = Path(__file__).with_name("racial_smv_example_data.csv")
+    visuals_dir = Path(__file__).with_name("analysis_outputs")
 
     (
         pair_stats,
@@ -635,6 +758,15 @@ if __name__ == "__main__":
         {"Men": men, "global_mean": value}
         for men, value in sorted(male_baseline.items(), key=lambda item: item[1])
     ]
+    saved_visuals = generate_visualisations(
+        visuals_dir,
+        heatmap_table,
+        male_summary,
+        female_overview,
+        correlation_matrix,
+        consensus_table,
+        polarisation_table,
+    )
 
     print("=== Pair Statistics (Women x Men) ===")
     print(
@@ -785,3 +917,8 @@ if __name__ == "__main__":
             ],
         )
     )
+
+    if saved_visuals:
+        print("\n=== Saved Visualisations ===")
+        for path in saved_visuals:
+            print(f"- {path}")
